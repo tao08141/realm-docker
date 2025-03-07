@@ -1,0 +1,82 @@
+name: Daily Docker Build
+
+on:
+  schedule:
+    - cron: '0 0 * * *' 
+  workflow_dispatch:    
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Get latest version
+        id: get-version
+        run: |
+          LATEST_TAG=$(curl -sL https://api.github.com/repos/zhboner/realm/releases/latest | jq -r '.tag_name')
+          echo "latest_version=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+      - name: Restore cached version
+        uses: actions/cache@v3
+        id: version-cache
+        with:
+          path: version.txt
+          key: realm-version-cache
+
+      - name: Read previous version
+        id: read-previous
+        run: |
+          if [ -f version.txt ]; then
+            PREVIOUS_VERSION=$(cat version.txt)
+            echo "previous_version=$PREVIOUS_VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "previous_version=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Compare versions
+        id: compare-versions
+        run: |
+          if [ "${{ steps.get-version.outputs.latest_version }}" == "${{ steps.read-previous.outputs.previous_version }}" ]; then
+            echo "build_needed=false" >> $GITHUB_OUTPUT
+            echo "✅ Version unchanged, skipping build"
+          else
+            echo "build_needed=true" >> $GITHUB_OUTPUT
+            echo "🚨 New version detected, starting build"
+          fi
+
+      - name: Build Docker image
+        if: steps.compare-versions.outputs.build_needed == 'true'
+        run: |
+          VERSION=${{ steps.get-version.outputs.latest_version }}
+          
+          # 创建临时 Dockerfile
+          cat <<EOF > Dockerfile
+          FROM alpine:latest
+          ARG VERSION
+          RUN apk add --no-cache curl tar ca-certificates
+          RUN curl -L -o /tmp/realm.tar.gz \\
+            "https://github.com/zhboner/realm/releases/download/\${VERSION}/realm-x86_64-unknown-linux-musl.tar.gz" \\
+            && tar -xzf /tmp/realm.tar.gz -C /tmp \\
+            && mv /tmp/realm /usr/bin/realm \\
+            && chmod +x /usr/bin/realm \\
+            && rm /tmp/realm.tar.gz
+          ENTRYPOINT ["/usr/bin/realm"]
+          EOF
+
+          # 构建并推送镜像
+          docker build --build-arg VERSION="$VERSION" -t ghcr.io/${{ github.repository }}/realm:$VERSION .
+
+          echo "$VERSION" > version.txt
+
+          echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
+          docker push ghcr.io/${{ github.repository }}/realm:$VERSION
+          docker tag ghcr.io/${{ github.repository }}:$VERSION ghcr.io/${{ github.repository }}:latest
+          docker push ghcr.io/${{ github.repository }}:latest
+
