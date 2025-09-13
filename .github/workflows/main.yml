@@ -2,14 +2,14 @@ name: Daily Docker Build
 
 on:
   schedule:
-    - cron: '0 0 * * *' 
-  workflow_dispatch:    
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write        # 允许推送 heartbeat 提交
       packages: write
 
     steps:
@@ -53,34 +53,44 @@ jobs:
             echo "🚨 New version detected, starting build"
           fi
 
+      - name: Heartbeat commit (update last run date)
+        run: |
+            mkdir -p .github
+            echo "Last run (UTC): $(date -u +'%Y-%m-%dT%H:%M:%SZ')" > .github/last_run.txt
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .github/last_run.txt
+            if git diff --cached --quiet; then
+              echo "No heartbeat changes to commit."
+            else
+              git commit -m "chore: heartbeat $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+              git push
+            fi
+
       - name: Build Docker image
         if: steps.compare-versions.outputs.build_needed == 'true'
         run: |
           VERSION=${{ steps.get-version.outputs.latest_version }}
           
-          # 创建临时 Dockerfile
           cat <<EOF > Dockerfile
           FROM ubuntu
           ARG VERSION
           RUN apt-get update && apt-get install -y curl tar ca-certificates --no-install-recommends && rm -rf /var/lib/apt/lists/*
 
-          RUN curl -L -o /tmp/realm.tar.gz \\
-            "https://github.com/zhboner/realm/releases/download/\${VERSION}/realm-x86_64-unknown-linux-musl.tar.gz" \\
-            && tar -xzf /tmp/realm.tar.gz -C /tmp \\
-            && mv /tmp/realm /usr/bin/realm \\
-            && chmod +x /usr/bin/realm \\
+          RUN curl -L -o /tmp/realm.tar.gz \
+            "https://github.com/zhboner/realm/releases/download/\${VERSION}/realm-x86_64-unknown-linux-musl.tar.gz" \
+            && tar -xzf /tmp/realm.tar.gz -C /tmp \
+            && mv /tmp/realm /usr/bin/realm \
+            && chmod +x /usr/bin/realm \
             && rm /tmp/realm.tar.gz
           ENTRYPOINT ["/usr/bin/realm"]
           EOF
 
-          # 构建并推送镜像
           docker build --build-arg VERSION="$VERSION" -t ghcr.io/${{ github.repository }}:$VERSION .
 
           echo "$VERSION" > version.txt
 
           echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-
           docker tag ghcr.io/${{ github.repository }}:$VERSION ghcr.io/${{ github.repository }}:latest
           docker push ghcr.io/${{ github.repository }}:$VERSION
           docker push ghcr.io/${{ github.repository }}:latest
-
